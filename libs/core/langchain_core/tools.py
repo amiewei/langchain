@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import textwrap
 import uuid
 import warnings
 from abc import ABC, abstractmethod
@@ -64,9 +65,9 @@ from langchain_core.runnables import (
     ensure_config,
 )
 from langchain_core.runnables.config import (
+    _set_config_context,
     patch_config,
     run_in_executor,
-    var_child_runnable_config,
 )
 from langchain_core.runnables.utils import accepts_context
 
@@ -308,7 +309,7 @@ class ChildTool(BaseTool):
                 }
         return tool_input
 
-    @root_validator()
+    @root_validator(pre=True)
     def raise_deprecation(cls, values: Dict) -> Dict:
         """Raise deprecation warning if callback_manager is used."""
         if values.get("callback_manager") is not None:
@@ -401,7 +402,7 @@ class ChildTool(BaseTool):
                 callbacks=run_manager.get_child(),
             )
             context = copy_context()
-            context.run(var_child_runnable_config.set, child_config)
+            context.run(_set_config_context, child_config)
             parsed_input = self._parse_input(tool_input)
             tool_args, tool_kwargs = self._to_args_and_kwargs(parsed_input)
             observation = (
@@ -501,7 +502,7 @@ class ChildTool(BaseTool):
                 callbacks=run_manager.get_child(),
             )
             context = copy_context()
-            context.run(var_child_runnable_config.set, child_config)
+            context.run(_set_config_context, child_config)
             coro = (
                 context.run(
                     self._arun, *tool_args, run_manager=run_manager, **tool_kwargs
@@ -825,16 +826,20 @@ class StructuredTool(BaseTool):
         else:
             raise ValueError("Function and/or coroutine must be provided")
         name = name or source_function.__name__
-        description = description or source_function.__doc__
-        if description is None:
+        description_ = description or source_function.__doc__
+        if description_ is None and args_schema:
+            description_ = args_schema.__doc__
+        if description_ is None:
             raise ValueError(
                 "Function must have a docstring if description not provided."
             )
+        if description is None:
+            # Only apply if using the function's docstring
+            description_ = textwrap.dedent(description_).strip()
 
         # Description example:
         # search_api(query: str) - Searches the API for the query.
-        sig = signature(source_function)
-        description = f"{name}{sig} - {description.strip()}"
+        description_ = f"{description_.strip()}"
         _args_schema = args_schema
         if _args_schema is None and infer_schema:
             # schema name is appended within function
@@ -844,7 +849,7 @@ class StructuredTool(BaseTool):
             func=func,
             coroutine=coroutine,
             args_schema=_args_schema,  # type: ignore[arg-type]
-            description=description,
+            description=description_,
             return_direct=return_direct,
             **kwargs,
         )
@@ -1053,7 +1058,16 @@ def render_text_description(tools: List[BaseTool]) -> str:
         search: This tool is used for search
         calculator: This tool is used for math
     """
-    return "\n".join([f"{tool.name}: {tool.description}" for tool in tools])
+    descriptions = []
+    for tool in tools:
+        if hasattr(tool, "func") and tool.func:
+            sig = signature(tool.func)
+            description = f"{tool.name}{sig} - {tool.description}"
+        else:
+            description = f"{tool.name} - {tool.description}"
+
+        descriptions.append(description)
+    return "\n".join(descriptions)
 
 
 def render_text_description_and_args(tools: List[BaseTool]) -> str:
@@ -1070,7 +1084,12 @@ args: {"expression": {"type": "string"}}
     tool_strings = []
     for tool in tools:
         args_schema = str(tool.args)
-        tool_strings.append(f"{tool.name}: {tool.description}, args: {args_schema}")
+        if hasattr(tool, "func") and tool.func:
+            sig = signature(tool.func)
+            description = f"{tool.name}{sig} - {tool.description}"
+        else:
+            description = f"{tool.name} - {tool.description}"
+        tool_strings.append(f"{description}, args: {args_schema}")
     return "\n".join(tool_strings)
 
 
